@@ -187,7 +187,7 @@ function execCLI(type, file, args) {
   })
 }
 
-function runCLIMaster({ url }) {
+function installMaster() {
   if (!fs.existsSync('lh-master')) {
     execFileSync('git', ['clone', 'https://github.com/GoogleChrome/lighthouse.git', 'lh-master'])
   }
@@ -196,6 +196,10 @@ function runCLIMaster({ url }) {
   execFileSync('git', ['clean', '-fxd', '-e', 'node_modules'], opts)
   execFileSync('git', ['pull'], opts)
   execFileSync('yarn', opts)
+}
+
+function runCLIMaster({ url }) {
+  const opts = { cwd: 'lh-master' }
   const sha = execFileSync('git', ['rev-parse', 'HEAD'], opts).toString('utf-8').substr(0, 6)
   const type = `lighthouse@master-${sha}`
   return execCLI(type, 'node', [
@@ -244,6 +248,14 @@ async function runDevTools({ version, url }) {
 }
 
 async function downloadLatestExtension() {
+  if (fs.existsSync('tmp-downloads')) {
+    rimraf.sync('tmp-downloads')
+  }
+  if (fs.existsSync('lh-extension')) {
+    rimraf.sync('lh-extension')
+  }
+  fs.mkdirSync('tmp-downloads')
+
   const extensionId = 'blipmdconlkpinefehnmjammfjpmpbjk'
 
   let browser
@@ -267,7 +279,7 @@ async function downloadLatestExtension() {
     await new Promise((resolve, reject) => {
       const timeoutHandle = setTimeout(reject, 30 * 1000)
       page.on('console', (msg) => {
-        if (/Calculated extension ID/i.test(msg._text)) {
+        if (/Calculated extension ID/i.test(msg.text())) {
           clearTimeout(timeoutHandle)
           resolve()
         }
@@ -281,6 +293,9 @@ async function downloadLatestExtension() {
     });
     await downloadLink.click()
 
+    // wait idk, 5s?
+    await new Promise(resolve => setTimeout(resolve, 5 * 1000))
+
     // finally, unzip
     const zipPath = 'tmp-downloads/' + fs.readdirSync('tmp-downloads').find(f => /\.zip$/.test(f))
     execFileSync('unzip', [
@@ -289,14 +304,19 @@ async function downloadLatestExtension() {
       '-d',
       'lh-extension',
     ])
+
+    // make a little tweak
+    const manifestPath = path.join('lh-extension', 'manifest.json')
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'))
+    manifest.permissions.push('tabs')
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2))
   } finally {
     await browser.close()
   }
 }
 
 async function runExtension({ url }) {
-  // await downloadLatestExtension()
-  const lighthouseExtensionPath = '/Users/cjamcl/src/lh-issue-runner/lh-extension'
+  const lighthouseExtensionPath = path.join(__dirname, 'lh-extension')
 
   let browser
   try {
@@ -311,14 +331,14 @@ async function runExtension({ url }) {
     const page = await browser.newPage()
     await page.goto(url, { waitUntil: 'networkidle2' })
 
-    const targets = await browser.targets();
+    const targets = await browser.targets()
     const extensionTarget = targets.find(({ _targetInfo }) => {
       return _targetInfo.title === 'Lighthouse' && _targetInfo.type === 'background_page'
     })
     const extensionPage = await extensionTarget.page()
     const outputLines = []
     extensionPage.on('console', (msg) => {
-      outputLines.push(msg._text)
+      outputLines.push(msg.text())
     })
 
     const client = await extensionTarget.createCDPSession()
@@ -342,10 +362,10 @@ async function runExtension({ url }) {
     //   throw new Error(lighthouseResult.exceptionDetails.text);
     // }
 
-    const pageUnderAudit = (await browser.pages()).find(page =>
+    const htmlReportPage = (await browser.pages()).find(page =>
       page.url().includes('blob:chrome-extension://')
     )
-    const htmlReport = await pageUnderAudit.content()
+    const htmlReport = await htmlReportPage.content()
 
     const extensionManifest = JSON.parse(fs.readFileSync('lh-extension/manifest.json'))
     const version = extensionManifest.version
@@ -556,6 +576,14 @@ async function runForComments() {
   }
 
   loadState()
+
+  if (runSettings.master) {
+    installMaster()
+  }
+
+  if (runSettings.extension) {
+    await downloadLatestExtension()
+  }
 
   await octokit.authenticate({
     type: 'token',
