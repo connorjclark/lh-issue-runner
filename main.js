@@ -6,6 +6,16 @@ const octokit = require('@octokit/rest')()
 // default to true
 const DRY_RUN = process.env.DRY_RUN ? process.env.DRY_RUN !== '0' : true
 
+const runSettings = {
+  cliVersions: [
+    '4.0.0-beta',
+    '3.2.1',
+  ],
+  psi: true,
+  master: true,
+  devTools: false,
+}
+
 // https://www.tomas-dvorak.cz/posts/nodejs-request-without-dependencies/
 const getContent = function (url) {
   // return new pending promise
@@ -103,7 +113,6 @@ function generateComment({ url, runs, surgeDomain }) {
   }
 
   const getUrlIfExists = (text, file) => {
-    console.log(`reports/${file}`, fs.existsSync(`reports/${file}`))
     if (!fs.existsSync(`reports/${file}`)) {
       return
     }
@@ -246,31 +255,32 @@ async function driver({ issue, commentText, surgeDomain }) {
 
   const runs = []
 
-  runs.push(await runCLIMaster({ url }))
+  if (runSettings.master) {
+    runs.push(await runCLIMaster({ url }))
+  }
 
-  const cliVersions = [
-    '4.0.0-beta',
-    '3.2.1',
-  ]
+  if (runSettings.cliVersions) {
+    for (const version of runSettings.cliVersions) {
+      const run = await runCLI({
+        version,
+        url
+      })
+      runs.push(run)
+    }
+  }
 
-  for (const version of cliVersions) {
-    const run = await runCLI({
+  if (runSettings.psi) {
+    runs.push(await runPSI({ url }))
+  }
+
+  if (runSettings.devTools) {
+    const version = '71'
+    const run = await runDevTools({
       version,
-      url
+      url,
     })
     runs.push(run)
   }
-
-  runs.push(await runPSI({ url }))
-
-  // {
-  //   const version = '71'
-  //   const run = await runDevTools({
-  //     version,
-  //     url
-  //   })
-  //   runs.push(run)
-  // }
 
   for (const { type, output } of runs) {
     const outputPath = `reports/${type}.output.txt`
