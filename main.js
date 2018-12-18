@@ -3,19 +3,6 @@ const fs = require('fs')
 const rimraf = require('rimraf')
 const octokit = require('@octokit/rest')()
 
-// default to true
-const DRY_RUN = process.env.DRY_RUN ? process.env.DRY_RUN !== '0' : true
-
-const runSettings = {
-  cliVersions: [
-    '4.0.0-beta',
-    '3.2.1',
-  ],
-  psi: true,
-  master: true,
-  devTools: false,
-}
-
 // https://www.tomas-dvorak.cz/posts/nodejs-request-without-dependencies/
 const getContent = function (url) {
   // return new pending promise
@@ -39,6 +26,16 @@ const getContent = function (url) {
   })
 }
 
+// default to true
+const DRY_RUN = process.env.DRY_RUN ? process.env.DRY_RUN !== '0' : true
+
+const runSettings = {
+  cliVersions: getCliVersions(),
+  psi: true,
+  master: true,
+  devTools: false,
+}
+
 const DEFAULT_GH_PARAMS = {
   owner: 'GoogleChrome',
   repo: 'lighthouse',
@@ -51,6 +48,31 @@ const psiKey = process.env.LH_RUNNER_PSI_KEY || fs.readFileSync(`${homeDir}/.psi
 const statePath = 'state.json'
 let state = {
   since: '2018-12-17T01:01:01Z',
+}
+
+// returns the latest release of the last two major versions
+function getCliVersions() {
+  // this seems to be ordered by semver
+  const versionsJson = execFileSync('npm', [
+    'view',
+    'lighthouse',
+    'versions',
+    '--json',
+  ])
+  const versions = JSON.parse(versionsJson)
+  const lastVersionOfMajor = {}
+  for (const version of versions) {
+    const major = version.split('.')[0]
+    lastVersionOfMajor[major] = version
+  }
+
+  const latestMajorVersion = Math.max(...Object.keys(lastVersionOfMajor).map(Number))
+
+  
+  return [
+    lastVersionOfMajor[latestMajorVersion],
+    lastVersionOfMajor[latestMajorVersion - 1],
+  ]
 }
 
 function loadState() {
