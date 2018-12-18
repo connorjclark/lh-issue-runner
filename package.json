@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "@octokit/rest": "^16.2.0",
+    "npx": "^10.2.0",
+    "rimraf": "^2.6.2",
+    "surge": "^0.20.1"
+  }
+}
