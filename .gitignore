@@ -2,3 +2,5 @@ node_modules
 state.json
 reports
 lh-master
+lh-extension
+tmp-downloads

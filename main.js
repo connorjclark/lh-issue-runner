@@ -1,10 +1,12 @@
 const { execFile, execFileSync } = require('child_process')
 const fs = require('fs')
 const rimraf = require('rimraf')
+const puppeteer = require('puppeteer')
+const path = require('path')
 const octokit = require('@octokit/rest')()
 
 // https://www.tomas-dvorak.cz/posts/nodejs-request-without-dependencies/
-const getContent = function (url) {
+const getContent = function (url, shouldJoin = true) {
   // return new pending promise
   return new Promise((resolve, reject) => {
     // select http or https module, depending on reqested url
@@ -19,7 +21,7 @@ const getContent = function (url) {
       // on every content chunk, push it to the data array
       response.on('data', (chunk) => body.push(chunk))
       // we are done, resolve promise with those joined chunks
-      response.on('end', () => resolve(body.join('')))
+      response.on('end', () => resolve(shouldJoin ? body.join('') : body))
     });
     // handle connection errors of the request
     request.on('error', (err) => reject(err))
@@ -34,6 +36,7 @@ const runSettings = {
   psi: true,
   master: true,
   devTools: false,
+  extension: true,
 }
 
 const DEFAULT_GH_PARAMS = {
@@ -67,8 +70,6 @@ function getCliVersions() {
   }
 
   const latestMajorVersion = Math.max(...Object.keys(lastVersionOfMajor).map(Number))
-
-  
   return [
     lastVersionOfMajor[latestMajorVersion],
     lastVersionOfMajor[latestMajorVersion - 1],
@@ -229,10 +230,135 @@ function runCLI({ version, url }) {
 async function runDevTools({ version, url }) {
   const type = `DevTools@${version}`
   // ok but how?
+  // 1. launch chrome w/ debugging port
+  // 2. open target page
+  // 3. launch puppeteer, connect to localhost:port
+  // 4. find page, append &can_dock=true&test=true, open
+  // 5. open audits panel, run
+  // 6. switch to target tab (otherwise snapshots won't be saved)
   return {
     type,
     output: 'TODO',
     lhr: null,
+  }
+}
+
+async function downloadLatestExtension() {
+  const extensionId = 'blipmdconlkpinefehnmjammfjpmpbjk'
+
+  let browser
+  try {
+    browser = await puppeteer.launch({
+      headless: false,
+      args: [
+        '--disable-extensions',
+        // '--remote-debugging-port=9222',
+      ]
+    })
+
+    const page = await browser.newPage()
+    await page.goto('https://robwu.nl/crxviewer/')
+
+    const xidInput = await page.$('input[name="xid"]')
+    await xidInput.type(extensionId)
+
+    const submitBtn = await page.$('#advanced-open-cws-extension input[type="submit"]')
+    await submitBtn.click()
+    await new Promise((resolve, reject) => {
+      const timeoutHandle = setTimeout(reject, 30 * 1000)
+      page.on('console', (msg) => {
+        if (/Calculated extension ID/i.test(msg._text)) {
+          clearTimeout(timeoutHandle)
+          resolve()
+        }
+      })
+    })
+
+    const downloadLink = await page.$('#download-link')
+    await page._client.send('Page.setDownloadBehavior', {
+      behavior: 'allow',
+      downloadPath: path.join(__dirname, 'tmp-downloads'),
+    });
+    await downloadLink.click()
+
+    // finally, unzip
+    const zipPath = 'tmp-downloads/' + fs.readdirSync('tmp-downloads').find(f => /\.zip$/.test(f))
+    execFileSync('unzip', [
+      '-a',
+      zipPath,
+      '-d',
+      'lh-extension',
+    ])
+  } finally {
+    await browser.close()
+  }
+}
+
+async function runExtension({ url }) {
+  // await downloadLatestExtension()
+  const lighthouseExtensionPath = '/Users/cjamcl/src/lh-issue-runner/lh-extension'
+
+  let browser
+  try {
+    browser = await puppeteer.launch({
+      headless: false,
+      executablePath: process.env.CHROME_PATH,
+      args: [
+        `--disable-extensions-except=${lighthouseExtensionPath}`,
+        `--load-extension=${lighthouseExtensionPath}`,
+      ],
+    })
+    const page = await browser.newPage()
+    await page.goto(url, { waitUntil: 'networkidle2' })
+
+    const targets = await browser.targets();
+    const extensionTarget = targets.find(({ _targetInfo }) => {
+      return _targetInfo.title === 'Lighthouse' && _targetInfo.type === 'background_page'
+    })
+    const extensionPage = await extensionTarget.page()
+    const outputLines = []
+    extensionPage.on('console', (msg) => {
+      outputLines.push(msg._text)
+    })
+
+    const client = await extensionTarget.createCDPSession()
+    // won't actually return anything until this: https://github.com/GoogleChrome/lighthouse/pull/6839
+    const lighthouseResult = await client.send('Runtime.evaluate', {
+      expression: `runLighthouseInExtension({
+        restoreCleanState: true,
+      })`,
+      awaitPromise: true,
+      returnByValue: true,
+    })
+
+    // if (lighthouseResult.exceptionDetails) {
+    //   // Log the full result if there was an error, since the relevant information may not be found
+    //   // in the error message alone.
+    //   console.error(lighthouseResult); // eslint-disable-line no-console
+    //   if (lighthouseResult.exceptionDetails.exception) {
+    //     throw new Error(lighthouseResult.exceptionDetails.exception.description);
+    //   }
+    // 
+    //   throw new Error(lighthouseResult.exceptionDetails.text);
+    // }
+
+    const pageUnderAudit = (await browser.pages()).find(page =>
+      page.url().includes('blob:chrome-extension://')
+    )
+    const htmlReport = await pageUnderAudit.content()
+
+    const extensionManifest = JSON.parse(fs.readFileSync('lh-extension/manifest.json'))
+    const version = extensionManifest.version
+
+    const type = `Extension@${version}`
+    fs.writeFileSync(`reports/${type}.report.html`, htmlReport)
+    return {
+      type,
+      output: outputLines.join("\n"),
+      lhr: null,
+    }
+  } finally {
+    browser.close()
   }
 }
 
@@ -299,6 +425,13 @@ async function driver({ issue, commentText, surgeDomain }) {
     const version = '71'
     const run = await runDevTools({
       version,
+      url,
+    })
+    runs.push(run)
+  }
+
+  if (runSettings.extension) {
+    const run = await runExtension({
       url,
     })
     runs.push(run)
