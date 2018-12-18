@@ -3,10 +3,40 @@ const fs = require('fs')
 const rimraf = require('rimraf')
 const octokit = require('@octokit/rest')()
 
+// default to true
+const DRY_RUN = process.env.DRY_RUN ? process.env.DRY_RUN !== '0' : true
+
+// https://www.tomas-dvorak.cz/posts/nodejs-request-without-dependencies/
+const getContent = function (url) {
+  // return new pending promise
+  return new Promise((resolve, reject) => {
+    // select http or https module, depending on reqested url
+    const lib = url.startsWith('https') ? require('https') : require('http');
+    const request = lib.get(url, (response) => {
+      // handle http errors
+      if (response.statusCode < 200 || response.statusCode > 299) {
+        reject(new Error('Failed to load page, status code: ' + response.statusCode))
+      }
+      // temporary data holder
+      const body = []
+      // on every content chunk, push it to the data array
+      response.on('data', (chunk) => body.push(chunk))
+      // we are done, resolve promise with those joined chunks
+      response.on('end', () => resolve(body.join('')))
+    });
+    // handle connection errors of the request
+    request.on('error', (err) => reject(err))
+  })
+}
+
 const DEFAULT_GH_PARAMS = {
   owner: 'GoogleChrome',
   repo: 'lighthouse',
 }
+
+const homeDir = require('os').homedir()
+const githubToken = process.env.LH_RUNNER_TOKEN || fs.readFileSync(`${homeDir}/.devtools-token`).toString('utf-8')
+const psiKey = process.env.LH_RUNNER_PSI_KEY || fs.readFileSync(`${homeDir}/.psi-key`).toString('utf-8')
 
 const statePath = 'state.json'
 let state = {
@@ -20,7 +50,46 @@ function loadState() {
 }
 
 function saveState() {
+  if (DRY_RUN) return
   fs.writeFileSync(statePath, JSON.stringify(state, null, 2))
+}
+
+async function sendComment({ body, issue }) {
+  if (DRY_RUN) {
+    console.log('sendComment', issue, body)
+    return
+  }
+
+  await octokit.issues.createComment({
+    ...DEFAULT_GH_PARAMS,
+    number: issue,
+    body,
+  })
+}
+
+async function removeLabel({ issue, label }) {
+  if (DRY_RUN) {
+    console.log('removeLabel', issue, label)
+    return
+  }
+
+  await octokit.issues.removeLabel({
+    ...DEFAULT_GH_PARAMS,
+    number: issue,
+    name: label,
+  })
+}
+
+function uploadReports(surgeDomain) {
+  if (DRY_RUN) {
+    console.log('uploadReports', surgeDomain)
+    return
+  }
+
+  execFileSync('./node_modules/.bin/surge', [
+    'reports',
+    surgeDomain
+  ])
 }
 
 function parseComment(comment) {
@@ -33,14 +102,24 @@ function generateComment({ url, runs, surgeDomain }) {
     return 'Could not find URL'
   }
 
+  const getUrlIfExists = (text, file) => {
+    console.log(`reports/${file}`, fs.existsSync(`reports/${file}`))
+    if (!fs.existsSync(`reports/${file}`)) {
+      return
+    }
+
+    return `[${text}](http://${surgeDomain}/${file})`
+  }
+
   const perRunSummary = runs.map(({ type, success }) => {
     const emojii = success ? '✅' : '❌'
-    const htmlUrl = `[html](http://${surgeDomain}/${type}.report.html)`
-    const jsonUrl = `[json](http://${surgeDomain}/${type}.report.json)`
-    const outputUrl = `[output](http://${surgeDomain}/${type}.output.txt)`
+    const htmlUrl = getUrlIfExists('html', `${type}.report.html`)
+    const jsonUrl = getUrlIfExists('json', `${type}.report.json`)
+    const outputUrl = getUrlIfExists('output', `${type}.output.txt`)
+    const urls = [htmlUrl, jsonUrl, outputUrl].filter(Boolean).join(' ')
     // add a nbsp so lighthouse@​4.0.0 doesn't become a mailto: link
     const typeNoMailLink = type.replace('@', '@&#8203;')
-    return `${emojii} ${htmlUrl} ${jsonUrl} ${outputUrl} ${typeNoMailLink}`
+    return `${emojii} ${urls} ${typeNoMailLink}`
   }).join("\n")
   return `I ran Lighthouse for ${url}, here's what I found.\n\n[index](http://${surgeDomain})\n${perRunSummary}`
 }
@@ -126,6 +205,20 @@ async function runDevTools({ version, url }) {
   }
 }
 
+async function runPSI({ url }) {
+  const type = 'PSI'
+  const apiEndpoint = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?key=${psiKey}&url=${url}`
+  const responseJson = await getContent(apiEndpoint)
+  const responseObject = responseJson && JSON.parse(responseJson)
+  const lhr = responseObject && responseObject.lighthouseResult
+  fs.writeFileSync(`reports/${type}.report.json`, JSON.stringify(lhr, null, 2))
+  return {
+    type,
+    output: responseJson,
+    lhr,
+  }
+}
+
 function wasRunSuccessfull({ lhr }) {
   if (!lhr) {
     return false
@@ -136,7 +229,7 @@ function wasRunSuccessfull({ lhr }) {
   return true
 }
 
-async function driver({issue, commentText, surgeDomain}) {
+async function driver({ issue, commentText, surgeDomain }) {
   // all output will just be saved to this reports folder,
   // and then zipped up and attached to the GH issue
   rimraf.sync(`reports`)
@@ -144,12 +237,9 @@ async function driver({issue, commentText, surgeDomain}) {
 
   const url = parseComment(commentText)
   if (!url) {
-    const outputComment = generateComment({ url })
-    await octokit.issues.createComment({
-      owner,
-      repo,
-      number: issue,
-      body: outputComment,
+    await sendComment({
+      issue,
+      body: generateComment({ url }),
     })
     return
   }
@@ -170,6 +260,8 @@ async function driver({issue, commentText, surgeDomain}) {
     })
     runs.push(run)
   }
+
+  runs.push(await runPSI({ url }))
 
   // {
   //   const version = '71'
@@ -210,21 +302,14 @@ async function driver({issue, commentText, surgeDomain}) {
     </html>
   `
   fs.writeFileSync('reports/index.html', indexHtml)
-
-  execFileSync('./node_modules/.bin/surge', [
-    'reports',
-    surgeDomain
-  ])
-
-  const outputComment = generateComment({
-    url,
-    runs,
-    surgeDomain,
-  })
-  await octokit.issues.createComment({
-    ...DEFAULT_GH_PARAMS,
-    number: issue,
-    body: outputComment,
+  uploadReports(surgeDomain)
+  await sendComment({
+    issue,
+    body: generateComment({
+      url,
+      runs,
+      surgeDomain,
+    })
   })
 }
 
@@ -236,8 +321,13 @@ async function runForIssues() {
     filter: 'all',
     state: 'all', // comment out when not testing
     labels: label
-  })).data.filter(issue => !issue.pull_request).map(({number}) => number)
-  
+  })).data.filter(issue => !issue.pull_request).map(({ number }) => number)
+
+  // if testing, ensure at least one issue will be processed
+  if (DRY_RUN && issues.indexOf(6830) === -1) {
+    issues.push(6830)
+  }
+
   if (issues.length) {
     console.log('running for issues:', issues)
   }
@@ -250,11 +340,10 @@ async function runForIssues() {
         ...DEFAULT_GH_PARAMS,
         number: issue
       })).data.body
-      await driver({issue, commentText, surgeDomain})
-      await octokit.issues.removeLabel({
-        ...DEFAULT_GH_PARAMS,
-        number: issue,
-        name: label,
+      await driver({ issue, commentText, surgeDomain })
+      await removeLabel({
+        issue,
+        label,
       })
     } catch (err) {
       console.error(err)
@@ -273,16 +362,16 @@ async function runForComments() {
   })).data.filter(c => c.updated_at != state.since)
 
   if (comments.length) {
-    console.log('running for comments:', comments.map(({id}) => id))
+    console.log('running for comments:', comments.map(({ id }) => id))
   }
 
-  for (const {id, body, issue_url, updated_at} of comments) {
+  for (const { id, body, issue_url, updated_at } of comments) {
     if (/LH Runner Go!/i.test(body)) {
       console.log(`processing comment ${id}`)
       const issueUrlSplit = issue_url.split('/')
       const issue = Number(issueUrlSplit[issueUrlSplit.length - 1])
       const surgeDomain = `lh-issue-runner-${issue}-${id}.surge.sh`
-      driver({issue, commentText: body, surgeDomain})
+      driver({ issue, commentText: body, surgeDomain })
       // only save state if any work was done
       state.since = updated_at
       saveState()
@@ -297,13 +386,15 @@ async function runForComments() {
 }
 
 (async function () {
+  if (DRY_RUN) {
+    console.log('*** dry run. set env var DRY_RUN=0 to run for realsies ***')
+  }
+
   loadState()
 
-  const homeDir = require('os').homedir()
-  const token = process.env.LH_RUNNER_TOKEN || fs.readFileSync(`${homeDir}/.devtools-token`).toString('utf-8')
   await octokit.authenticate({
     type: 'token',
-    token,
+    token: githubToken,
   })
 
   await runForIssues()
