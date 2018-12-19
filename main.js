@@ -310,6 +310,14 @@ async function downloadLatestExtension() {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'))
     manifest.permissions.push('tabs')
     fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2))
+
+    // make a really gross tweak
+    // remove when this lands: https://github.com/GoogleChrome/lighthouse/pull/6839
+    const bundlePath = path.join('lh-extension', 'scripts', 'lighthouse-ext-bundle.js')
+    const bundleCode = fs.readFileSync(bundlePath, 'utf-8')
+    const hookPoint = 'await new Promise(resolve=>chrome.windows.create({url:blobURL},resolve));'
+    fs.writeFileSync(bundlePath, bundleCode.replace(hookPoint, hookPoint + 'return runnerResult;'))
+    // await new Promise(resolve=>chrome.windows.create({url:blobURL},resolve));
   } finally {
     await browser.close()
   }
@@ -343,39 +351,25 @@ async function runExtension({ url }) {
 
     const client = await extensionTarget.createCDPSession()
     // won't actually return anything until this: https://github.com/GoogleChrome/lighthouse/pull/6839
-    const lighthouseResult = await client.send('Runtime.evaluate', {
+    // but it will b/c of the earlier gross tweak
+    const { lhr, report } = (await client.send('Runtime.evaluate', {
       expression: `runLighthouseInExtension({
         restoreCleanState: true,
       })`,
       awaitPromise: true,
       returnByValue: true,
-    })
-
-    // if (lighthouseResult.exceptionDetails) {
-    //   // Log the full result if there was an error, since the relevant information may not be found
-    //   // in the error message alone.
-    //   console.error(lighthouseResult); // eslint-disable-line no-console
-    //   if (lighthouseResult.exceptionDetails.exception) {
-    //     throw new Error(lighthouseResult.exceptionDetails.exception.description);
-    //   }
-    // 
-    //   throw new Error(lighthouseResult.exceptionDetails.text);
-    // }
-
-    const htmlReportPage = (await browser.pages()).find(page =>
-      page.url().includes('blob:chrome-extension://')
-    )
-    const htmlReport = await htmlReportPage.content()
+    })).result.value
 
     const extensionManifest = JSON.parse(fs.readFileSync('lh-extension/manifest.json'))
     const version = extensionManifest.version
 
     const type = `Extension@${version}`
-    fs.writeFileSync(`reports/${type}.report.html`, htmlReport)
+    fs.writeFileSync(`reports/${type}.report.html`, report)
+    fs.writeFileSync(`reports/${type}.report.json`, JSON.stringify(lhr, null, 2))
     return {
       type,
       output: outputLines.join("\n"),
-      lhr: null,
+      lhr,
     }
   } finally {
     browser.close()
@@ -498,8 +492,7 @@ async function driver({ issue, commentText, surgeDomain }) {
   })
 }
 
-// run on all issues with 'needs-lh-runnner' label
-async function runForIssues() {
+async function findIssues() {
   const label = 'needs-lh-runner'
   const issues = (await octokit.issues.list({
     ...DEFAULT_GH_PARAMS,
@@ -512,6 +505,13 @@ async function runForIssues() {
   if (DRY_RUN && issues.indexOf(6830) === -1) {
     issues.push(6830)
   }
+
+  return issues
+}
+
+// run on all issues with 'needs-lh-runnner' label
+async function runForIssues(issues) {
+  const label = 'needs-lh-runner'
 
   if (issues.length) {
     console.log('running for issues:', issues)
@@ -536,37 +536,32 @@ async function runForIssues() {
   }
 }
 
-// run for comments requesting like so: LH Issue Runner go!
-async function runForComments() {
-  const comments = (await octokit.issues.listCommentsForRepo({
+async function findComments() {
+  // don't bother paginating, just look at 100 per run
+  return (await octokit.issues.listCommentsForRepo({
     ...DEFAULT_GH_PARAMS,
     sort: 'updated',
     direction: 'asc',
     since: state.since,
     per_page: 100,
-  })).data.filter(c => c.updated_at != state.since)
+  })).data.filter(c => c.updated_at != state.since).filter(({ body }) => /LH Runner Go!/i.test(body))
+}
 
+// run for comments requesting like so: LH Issue Runner go!
+async function runForComments(comments) {
   if (comments.length) {
     console.log('running for comments:', comments.map(({ id }) => id))
   }
 
   for (const { id, body, issue_url, updated_at } of comments) {
-    if (/LH Runner Go!/i.test(body)) {
-      console.log(`processing comment ${id}`)
-      const issueUrlSplit = issue_url.split('/')
-      const issue = Number(issueUrlSplit[issueUrlSplit.length - 1])
-      const surgeDomain = `lh-issue-runner-${issue}-${id}.surge.sh`
-      driver({ issue, commentText: body, surgeDomain })
-      // only save state if any work was done
-      state.since = updated_at
-      saveState()
-    }
-  }
-
-  if (comments.length) {
-    state.since = comments[comments.length - 1].updated_at
+    console.log(`processing comment ${id}`)
+    const issueUrlSplit = issue_url.split('/')
+    const issue = Number(issueUrlSplit[issueUrlSplit.length - 1])
+    const surgeDomain = `lh-issue-runner-${issue}-${id}.surge.sh`
+    driver({ issue, commentText: body, surgeDomain })
+    // only save state if any work was done
+    state.since = updated_at
     saveState()
-    await runForComments()
   }
 }
 
@@ -577,21 +572,26 @@ async function runForComments() {
 
   loadState()
 
-  if (runSettings.master) {
-    installMaster()
-  }
-
-  if (runSettings.extension) {
-    await downloadLatestExtension()
-  }
-
   await octokit.authenticate({
     type: 'token',
     token: githubToken,
   })
 
-  await runForIssues()
-  await runForComments()
+  const issues = await findIssues()
+  const comments = await findComments()
+
+  if (issues.length || comments.length) {
+    if (runSettings.master) {
+      installMaster()
+    }
+
+    if (runSettings.extension) {
+      await downloadLatestExtension()
+    }
+
+    await runForIssues(issues)
+    await runForComments(comments)
+  }
 
   saveState()
 })()
