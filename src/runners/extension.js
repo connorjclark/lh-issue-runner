@@ -123,8 +123,9 @@ module.exports = {
 
       const extensionManifest = JSON.parse(fs.readFileSync(`${extensionDir}/manifest.json`))
       const version = extensionManifest.version
+      const chromeVersion = (await browser.version()).replace(/[()/]/g, '')
 
-      const type = `Extension@${version}`
+      const type = `Extension@${version}-${chromeVersion}`
       fs.writeFileSync(`${reportsDir}/${type}.report.html`, report)
       fs.writeFileSync(`${reportsDir}/${type}.report.json`, JSON.stringify(lhr, null, 2))
       return {
