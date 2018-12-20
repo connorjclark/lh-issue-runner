@@ -113,7 +113,13 @@ function uploadReports(surgeDomain) {
 
 function parseComment(comment) {
   const matches = /http[^\s]*/.exec(comment)
-  return matches ? matches[0] : null
+  const url = matches ? matches[0] : null
+
+  if (url && url.includes('localhost')) {
+    return null
+  }
+
+  return url
 }
 
 function generateComment({ url, runs, surgeDomain }) {
