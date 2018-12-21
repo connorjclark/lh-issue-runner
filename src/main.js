@@ -336,6 +336,12 @@ async function runForComments(comments) {
 
     await runForIssues(issues)
     await runForComments(comments)
+
+    // be nice and wait a whole second before shutting down
+    // for some reason the cli process isn't correctly canceled,
+    // so if the page causes LH to hang for some reason this helps
+    // shuts things down all the way
+    setTimeout(process.exit, 1000)
   }
 
   saveState()

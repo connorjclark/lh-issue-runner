@@ -3,10 +3,12 @@ const path = require('path')
 const puppeteer = require('puppeteer')
 const rimraf = require('rimraf')
 const { execFileSync } = require('child_process')
-const { rootDir, reportsDir } = require('../utils')
+const { attemptRun, rootDir, reportsDir } = require('../utils')
 
 const tmpDownloadsDir = `${rootDir}/tmp-downloads`
 const extensionDir = `${rootDir}/lh-extension`
+
+let _version, _chromeVersion
 
 module.exports = {
   async oneTimeSetup() {
@@ -79,6 +81,10 @@ module.exports = {
       const bundleCode = fs.readFileSync(bundlePath, 'utf-8')
       const hookPoint = 'await new Promise(resolve=>chrome.windows.create({url:blobURL},resolve));'
       fs.writeFileSync(bundlePath, bundleCode.replace(hookPoint, hookPoint + 'return runnerResult;'))
+
+      // save version info
+      _version = manifest.version
+      _chromeVersion = (await browser.version()).replace(/[()/]/g, '')
     } catch (err) {
       throw err
     } finally {
@@ -86,55 +92,53 @@ module.exports = {
     }
   },
 
-  async run(url) {
+  run(url) {
+    const type = `Extension@${_version}-${_chromeVersion}`
     let browser
-    try {
-      browser = await puppeteer.launch({
-        headless: false,
-        executablePath: process.env.CHROME_PATH,
-        args: [
-          `--disable-extensions-except=${extensionDir}`,
-          `--load-extension=${extensionDir}`,
-        ],
-      })
-      const page = await browser.newPage()
-      await page.goto(url, { waitUntil: 'networkidle2' })
+    let cancel = async () => browser && await browser.close()
+    return attemptRun(type, async () => {
+      try {
+        browser = await puppeteer.launch({
+          headless: false,
+          executablePath: process.env.CHROME_PATH,
+          args: [
+            `--disable-extensions-except=${extensionDir}`,
+            `--load-extension=${extensionDir}`,
+          ],
+        })
+        const page = await browser.newPage()
+        await page.goto(url, { waitUntil: 'networkidle2' })
 
-      const targets = await browser.targets()
-      const extensionTarget = targets.find(({ _targetInfo }) => {
-        return _targetInfo.title === 'Lighthouse' && _targetInfo.type === 'background_page'
-      })
-      const extensionPage = await extensionTarget.page()
-      const outputLines = []
-      extensionPage.on('console', (msg) => {
-        outputLines.push(msg.text())
-      })
+        const targets = await browser.targets()
+        const extensionTarget = targets.find(({ _targetInfo }) => {
+          return _targetInfo.title === 'Lighthouse' && _targetInfo.type === 'background_page'
+        })
+        const extensionPage = await extensionTarget.page()
+        const outputLines = []
+        extensionPage.on('console', (msg) => {
+          outputLines.push(msg.text())
+        })
 
-      const client = await extensionTarget.createCDPSession()
-      // won't actually return anything until this: https://github.com/GoogleChrome/lighthouse/pull/6839
-      // but it will b/c of the earlier gross tweak
-      const { lhr, report } = (await client.send('Runtime.evaluate', {
-        expression: `runLighthouseInExtension({
-          restoreCleanState: true,
-        })`,
-        awaitPromise: true,
-        returnByValue: true,
-      })).result.value
+        const client = await extensionTarget.createCDPSession()
+        // won't actually return anything until this: https://github.com/GoogleChrome/lighthouse/pull/6839
+        // but it will b/c of the earlier gross tweak
+        const { lhr, report } = (await client.send('Runtime.evaluate', {
+          expression: `runLighthouseInExtension({
+            restoreCleanState: true,
+          })`,
+          awaitPromise: true,
+          returnByValue: true,
+        })).result.value
 
-      const extensionManifest = JSON.parse(fs.readFileSync(`${extensionDir}/manifest.json`))
-      const version = extensionManifest.version
-      const chromeVersion = (await browser.version()).replace(/[()/]/g, '')
-
-      const type = `Extension@${version}-${chromeVersion}`
-      fs.writeFileSync(`${reportsDir}/${type}.report.html`, report)
-      fs.writeFileSync(`${reportsDir}/${type}.report.json`, JSON.stringify(lhr, null, 2))
-      return {
-        type,
-        output: outputLines.join("\n"),
-        lhr,
+        fs.writeFileSync(`${reportsDir}/${type}.report.html`, report)
+        fs.writeFileSync(`${reportsDir}/${type}.report.json`, JSON.stringify(lhr, null, 2))
+        return {
+          output: outputLines.join("\n"),
+          lhr,
+        }
+      } finally {
+        browser.close()
       }
-    } finally {
-      browser.close()
-    }
+    }, cancel)
   },
 }

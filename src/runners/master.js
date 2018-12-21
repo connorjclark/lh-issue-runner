@@ -1,6 +1,6 @@
 const fs = require('fs')
 const { execFileSync } = require('child_process')
-const { execCLI, rootDir, reportsDir } = require('../utils')
+const { attemptRun, execCLI, rootDir, reportsDir } = require('../utils')
 
 module.exports = {
   oneTimeSetup() {
@@ -18,7 +18,7 @@ module.exports = {
     const opts = { cwd: 'lh-master' }
     const sha = execFileSync('git', ['rev-parse', 'HEAD'], opts).toString('utf-8').substr(0, 6)
     const type = `lighthouse@master-${sha}`
-    return execCLI(type, 'node', [
+    const { promise, cancel } = execCLI(type, 'node', [
       `lh-master/lighthouse-cli`,
       url,
       '--output',
@@ -28,5 +28,6 @@ module.exports = {
       '--output-path',
       `${reportsDir}/${type}`,
     ])
+    return attemptRun(type, () => promise, cancel)
   },
 }

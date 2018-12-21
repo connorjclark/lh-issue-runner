@@ -1,11 +1,16 @@
-const { execCLI, rootDir, reportsDir } = require('../utils')
+const { attemptRun, execCLI, rootDir, reportsDir } = require('../utils')
 
 module.exports = {
   async run(url, { versions }) {
     const runs = []
-    
+
     for (const version of versions) {
-      runs.push(await this.runSingle(url, version))
+      try {
+        const result = await this.runSingle(url, version)
+        result && runs.push(result)
+      } catch (err) {
+        console.error(err)
+      }
     }
 
     return runs
@@ -13,7 +18,7 @@ module.exports = {
 
   runSingle(url, version) {
     const type = `lighthouse@${version}`
-    return execCLI(type, 'node', [
+    const { promise, cancel } = execCLI(type, 'node', [
       `${rootDir}/node_modules/npx`,
       '-p',
       `lighthouse@${version}`,
@@ -26,5 +31,6 @@ module.exports = {
       '--output-path',
       `${reportsDir}/${type}`,
     ])
+    return attemptRun(type, () => promise, cancel)
   }
 }

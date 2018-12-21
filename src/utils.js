@@ -6,11 +6,12 @@ module.exports.rootDir = path.dirname(path.dirname(require.main.filename))
 module.exports.reportsDir = path.join(module.exports.rootDir, 'reports')
 
 module.exports.execCLI = function execCLI(type, file, args) {
-  return new Promise((resolve) => {
-    const processHandle = execFile(file, args, (err) => {
+  /** @type {ChildProcess} processHandle */
+  let processHandle
+  const promise = new Promise((resolve) => {
+    processHandle = execFile(file, args, (err) => {
       if (err) {
         resolve({
-          type,
           output,
           lhr: null
         })
@@ -20,7 +21,6 @@ module.exports.execCLI = function execCLI(type, file, args) {
       const lhr = JSON.parse(fs.readFileSync(`${module.exports.reportsDir}/${type}.report.json`).toString('utf-8'))
 
       resolve({
-        type,
         output,
         lhr,
       })
@@ -34,6 +34,13 @@ module.exports.execCLI = function execCLI(type, file, args) {
       output += data
     })
   })
+  const cancel = () => {
+    processHandle && processHandle.kill() // this doesn't seem to work. B/c chrome process?
+  }
+  return {
+    promise,
+    cancel,
+  }
 }
 
 // https://www.tomas-dvorak.cz/posts/nodejs-request-without-dependencies/
@@ -57,4 +64,37 @@ module.exports.getContent = function getContent(url, shouldJoin = true) {
     // handle connection errors of the request
     request.on('error', (err) => reject(err))
   })
+}
+
+// applies time out, and catches any errors and returns as output
+module.exports.attemptRun = async function(type, fn, cancel = null) {
+  try {
+    let cancelTimeout
+    const resultPromise = fn().catch(cancelTimeout)
+    const timeoutPromise = new Promise((resolve, reject) => {
+      const timeoutHandle = setTimeout(() => {
+        reject(new Error(`timed out run for ${type}`))
+      }, 60 * 1000)
+      cancelTimeout = () => {
+        clearTimeout(timeoutHandle)
+        resolve()
+      }
+    })
+    const result = await Promise.race([
+      resultPromise,
+      timeoutPromise,
+    ])
+    cancelTimeout()
+    return {
+      type,
+      ...result, // should return {output, lhr}
+    }
+  } catch(err) {
+    cancel && await cancel()
+    return {
+      type,
+      output: err.toString(),
+      lhr: null,
+    }
+  }
 }
