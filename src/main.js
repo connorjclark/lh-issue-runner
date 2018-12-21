@@ -180,17 +180,15 @@ async function driver({ issue, commentText, surgeDomain }) {
       continue
     }
 
-    let result
     try {
-      result = await runner.run(url, settings)
+      const result = await runner.run(url, settings)
+      if (result && Array.isArray(result)) {
+        runs.push(...result)
+      } else if (result) {
+        runs.push(result)
+      }
     } catch (err) {
       console.error(err)
-    }
-
-    if (result && Array.isArray(result)) {
-      runs.push(...result)
-    } else if (result) {
-      runs.push(result)
     }
   }
 
@@ -302,7 +300,7 @@ async function runForComments(comments) {
     const issueUrlSplit = issue_url.split('/')
     const issue = Number(issueUrlSplit[issueUrlSplit.length - 1])
     const surgeDomain = `lh-issue-runner-${issue}-${id}.surge.sh`
-    driver({ issue, commentText: body, surgeDomain })
+    await driver({ issue, commentText: body, surgeDomain })
     // only save state if any work was done
     state.since = updated_at
     saveState()
