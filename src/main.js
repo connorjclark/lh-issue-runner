@@ -31,11 +31,9 @@ const DEFAULT_GH_PARAMS = {
   repo: 'lighthouse',
 }
 
-// const psiKey = process.env.LH_RUNNER_PSI_KEY || fs.readFileSync(`${homeDir}/.psi-key`).toString('utf-8')
-
 const statePath = 'state.json'
 let state = {
-  since: '2018-12-17T01:01:01Z',
+  since: '2019-01-02T19:23:15Z',
 }
 
 // returns the latest release of the last two major versions
