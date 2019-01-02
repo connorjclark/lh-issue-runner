@@ -21,7 +21,7 @@ const runSettings = {
   extension: true,
 }
 
-// load './runners/${keyof runSettinngs}' if value is truthy
+// load './runners/${keyof runSettings}' if value is truthy
 // put in runners object (type => module)
 const truthyRunners = Object.entries(runSettings).filter(([, value]) => Boolean(value)).map(([type,]) => type)
 const runners = truthyRunners.reduce((acc, el) => (acc[el] = require('./runners/' + el), acc), {})
@@ -321,6 +321,13 @@ async function runForComments(comments) {
   const comments = await findComments()
 
   if (issues.length || comments.length) {
+    // https://github.com/npm/npm/issues/18036
+    execFileSync('npm', [
+      'cache',
+      'clean',
+      '--force',
+    ])
+
     for (const [type, runner] of Object.entries(runners)) {
       if (runner.oneTimeSetup) {
         try {
