@@ -241,7 +241,7 @@ async function findIssues() {
   })).data.filter(issue => !issue.pull_request).map(({ number }) => number)
 
   // if testing, ensure at least one issue will be processed
-  if (DRY_RUN && issues.indexOf(6830) === -1) {
+  if (DRY_RUN && issues.length === 0) {
     issues.push(6830)
   }
 
@@ -280,11 +280,11 @@ async function findComments() {
   // don't bother paginating, just look at 100 per run
   return (await octokit.issues.listCommentsForRepo({
     ...DEFAULT_GH_PARAMS,
-    sort: 'updated',
+    sort: 'created',
     direction: 'asc',
     since: state.since,
     per_page: 100,
-  })).data.filter(c => c.updated_at != state.since).filter(({ body }) => /LH Runner Go!/i.test(body))
+  })).data.filter(c => c.created_at != state.since).filter(({ body }) => /LH Runner Go!/i.test(body))
 }
 
 // run for comments requesting like so: LH Issue Runner go!
@@ -293,14 +293,14 @@ async function runForComments(comments) {
     console.log('running for comments:', comments.map(({ id }) => id))
   }
 
-  for (const { id, body, issue_url, updated_at } of comments) {
+  for (const { id, body, issue_url, created_at } of comments) {
     console.log(`processing comment ${id}`)
     const issueUrlSplit = issue_url.split('/')
     const issue = Number(issueUrlSplit[issueUrlSplit.length - 1])
     const surgeDomain = `lh-issue-runner-${issue}-${id}.surge.sh`
     await driver({ issue, commentText: body, surgeDomain })
     // only save state if any work was done
-    state.since = updated_at
+    state.since = created_at
     saveState()
   }
 }
