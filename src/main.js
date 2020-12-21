@@ -18,7 +18,6 @@ const runSettings = {
   },
   master: true,
   devTools: false,
-  extension: true,
 }
 
 // load './runners/${keyof runSettings}' if value is truthy
@@ -36,7 +35,7 @@ let state = {
   since: '2019-01-02T19:23:15Z',
 }
 
-// returns the latest release of the last two major versions
+// returns the latest release of the last three major versions
 function getCliVersions() {
   // this seems to be ordered by semver
   const versionsJson = execFileSync('npm', [
@@ -56,6 +55,7 @@ function getCliVersions() {
   return [
     lastVersionOfMajor[latestMajorVersion],
     lastVersionOfMajor[latestMajorVersion - 1],
+    lastVersionOfMajor[latestMajorVersion - 2],
   ]
 }
 
@@ -265,7 +265,6 @@ async function runForIssues(issues) {
         number: issue
       })).data.body
       await driver({ issue, commentText, surgeDomain })
-      debugger;
       await removeLabel({
         issue,
         label,
